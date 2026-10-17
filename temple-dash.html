@@ -1,0 +1,232 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1,user-scalable=no,viewport-fit=cover">
+<title>Temple Dash</title>
+<link href="https://fonts.googleapis.com/css2?family=Cinzel:wght@600;800&display=swap" rel="stylesheet">
+<style>
+html,body{margin:0;height:100%;overflow:hidden;background:#1b2a22;font-family:'Cinzel',Georgia,serif;color:#f3e6bf;touch-action:none;user-select:none;-webkit-user-select:none}
+canvas{display:block;width:100%;height:100%}
+#hud{position:fixed;top:0;left:0;right:0;padding:max(14px,env(safe-area-inset-top)) 18px 0;display:flex;justify-content:space-between;pointer-events:none;text-shadow:0 2px 6px #000a}
+#hud b{font-size:clamp(26px,5vw,44px);font-weight:800}
+#hud small{display:block;font-size:13px;opacity:.8}
+#hud .r{text-align:right}
+#ov{position:fixed;inset:0;display:flex;flex-direction:column;align-items:center;justify-content:center;gap:16px;background:radial-gradient(#0000 20%,#0b1a12dd);text-align:center;padding:20px}
+#ov.hide{display:none}
+h1{font-size:clamp(44px,11vw,92px);margin:0;font-weight:800;letter-spacing:.04em;color:#f0c24b;text-shadow:0 4px 0 #6b4a0e,0 12px 30px #000a}
+#ov p{max-width:430px;line-height:1.55;margin:0;font-size:16px}
+button{font:inherit;font-weight:800;font-size:22px;padding:12px 44px;border:0;border-radius:6px;background:#f0c24b;color:#2a1c05;cursor:pointer;box-shadow:0 5px 0 #8a6414}
+button:active{transform:translateY(3px);box-shadow:0 2px 0 #8a6414}
+button:focus-visible{outline:3px solid #fff}
+</style>
+</head>
+<body>
+<canvas id="c"></canvas>
+<div id="hud"><div><b id="sc">0</b><small>metres</small></div><div class="r"><b id="co">0</b><small id="bs">best 0</small></div></div>
+<div id="ov">
+  <h1 id="ti">Temple Dash</h1>
+  <p id="ms">Run through the ruins. Swipe or use the arrow keys / WASD: left and right to change lane, up or space to jump, down to slide under beams.</p>
+  <button id="go">Run</button>
+</div>
+
+<script src="https://cdnjs.cloudflare.com/ajax/libs/three.js/r128/three.min.js"></script>
+<script>
+const $=id=>document.getElementById(id), rnd=Math.random;
+let best=0;try{best=+localStorage.getItem('templeDash')||0}catch(e){}
+$('bs').textContent='best '+best;
+
+/* ---------- renderer / scene ---------- */
+const renderer=new THREE.WebGLRenderer({canvas:$('c'),antialias:true});
+renderer.setPixelRatio(Math.min(devicePixelRatio,2));
+renderer.shadowMap.enabled=true;
+const FOG=0x7fb09a;
+const scene=new THREE.Scene();scene.background=new THREE.Color(FOG);scene.fog=new THREE.Fog(FOG,25,100);
+const cam=new THREE.PerspectiveCamera(65,1,.1,200);
+function resize(){renderer.setSize(innerWidth,innerHeight);cam.aspect=innerWidth/innerHeight;cam.updateProjectionMatrix()}
+addEventListener('resize',resize);resize();
+scene.add(new THREE.HemisphereLight(0xdff5e6,0x3a4a2a,.85));
+const sun=new THREE.DirectionalLight(0xffe2b0,.95);sun.castShadow=true;sun.shadow.mapSize.set(1024,1024);
+Object.assign(sun.shadow.camera,{left:-12,right:12,top:20,bottom:-20,far:70});
+scene.add(sun,sun.target);
+
+/* ---------- textures & materials ---------- */
+function stoneTex(){
+  const c=document.createElement('canvas');c.width=c.height=256;const g=c.getContext('2d');
+  g.fillStyle='#8b8577';g.fillRect(0,0,256,256);
+  for(let i=0;i<2800;i++){const v=105+rnd()*70|0;g.fillStyle=`rgba(${v},${v-6},${v-18},.35)`;g.fillRect(rnd()*256,rnd()*256,3,3)}
+  g.strokeStyle='#4a463d';g.lineWidth=3;
+  for(let y=0;y<=256;y+=64){g.beginPath();g.moveTo(0,y);g.lineTo(256,y);g.stroke()}
+  for(let y=0;y<4;y++)for(let x=(y%2)*64;x<=256;x+=128){g.beginPath();g.moveTo(x,y*64);g.lineTo(x,y*64+64);g.stroke()}
+  for(let i=0;i<45;i++){g.fillStyle='rgba(70,115,50,.25)';g.beginPath();g.arc(rnd()*256,rnd()*256,4+rnd()*13,0,7);g.fill()}
+  const t=new THREE.CanvasTexture(c);t.wrapS=t.wrapT=THREE.RepeatWrapping;t.repeat.set(2,2);t.anisotropy=4;return t;
+}
+const tex=stoneTex();
+const M=(c,o={})=>new THREE.MeshStandardMaterial(Object.assign({color:c,roughness:.85},o));
+const stone=M(0xffffff,{map:tex,roughness:.95}), stoneD=M(0x9a948a,{map:tex,roughness:.95});
+const gold=M(0xf0c24b,{metalness:.6,roughness:.3,emissive:0x6a4a00}), flame=M(0xffa030,{emissive:0xff7a10,emissiveIntensity:1.4});
+const bark=M(0x5a3c22), logM=M(0x6e4a2a), lava=M(0x300808,{emissive:0xff3a10,emissiveIntensity:.9});
+const leaves=[M(0x2f7a45,{flatShading:true}),M(0x3d9150,{flatShading:true}),M(0x4aa55a,{flatShading:true})];
+
+/* ---------- player ---------- */
+const P=new THREE.Group();scene.add(P);
+const body=new THREE.Group();body.position.y=.85;P.add(body);
+function bx(w,h,d,mat,x,y,z,par){const m=new THREE.Mesh(new THREE.BoxGeometry(w,h,d),mat);m.position.set(x,y,z);m.castShadow=true;par.add(m);return m}
+bx(.6,.7,.35,M(0x2e6b4f),0,.35,0,body);
+bx(.42,.46,.2,M(0x8a5a2b),0,.4,.27,body);
+const head=new THREE.Mesh(new THREE.SphereGeometry(.22,14,12),M(0xd9a679));head.position.y=.92;head.castShadow=true;body.add(head);
+const brim=new THREE.Mesh(new THREE.CylinderGeometry(.38,.38,.04,16),M(0x7a5230));brim.position.y=1.06;body.add(brim);
+const crown=new THREE.Mesh(new THREE.CylinderGeometry(.2,.24,.2,14),M(0x7a5230));crown.position.y=1.16;body.add(crown);
+function limb(x,y,w,h,c){const p=new THREE.Group();p.position.set(x,y,0);bx(w,h,w,M(c),0,-h/2,0,p);body.add(p);return p}
+const legL=limb(-.15,0,.2,.85,0x4b3a2a),legR=limb(.15,0,.2,.85,0x4b3a2a);
+const armL=limb(-.4,.62,.15,.6,0xd9a679),armR=limb(.4,.62,.15,.6,0xd9a679);
+
+/* ---------- world tiles ---------- */
+const TL=10,NT=14,tiles=[];
+const trunkG=new THREE.CylinderGeometry(.35,.6,6,6), canG=[2.6,2.1,1.5].map(r=>new THREE.IcosahedronGeometry(r,0));
+function tree(){
+  const g=new THREE.Group();
+  const t=new THREE.Mesh(trunkG,bark);t.position.y=3;t.castShadow=true;g.add(t);
+  canG.forEach((cg,i)=>{const c=new THREE.Mesh(cg,leaves[i]);c.position.y=6+i*1.4;c.scale.y=.75;c.castShadow=true;g.add(c)});
+  return g;
+}
+function scatter(tl){tl.userData.trees.forEach(t=>{t.position.set(t.userData.s*(7+rnd()*10),0,(rnd()-.5)*TL);const k=.8+rnd()*.9;t.scale.set(k,k,k);t.rotation.y=rnd()*6})}
+for(let i=0;i<NT;i++){
+  const g=new THREE.Group(),f=new THREE.Mesh(new THREE.BoxGeometry(8.4,.6,TL),stone);
+  f.position.y=-.3;f.receiveShadow=true;g.add(f);g.userData.trees=[];
+  for(const s of[-1,1]){
+    const w=new THREE.Mesh(new THREE.BoxGeometry(.9,1.1,TL),stoneD);w.position.set(s*4.65,.25,0);w.castShadow=w.receiveShadow=true;g.add(w);
+    const p=new THREE.Mesh(new THREE.BoxGeometry(1.2,2.8,1.2),stoneD);p.position.set(s*4.65,1.4,TL/2-.6);p.castShadow=true;g.add(p);
+    const fl=new THREE.Mesh(new THREE.SphereGeometry(.24,8,8),flame);fl.position.set(s*4.65,3.0,TL/2-.6);g.add(fl);
+    for(let k=0;k<2;k++){const t=tree();t.userData.s=s;g.add(t);g.userData.trees.push(t)}
+  }
+  scatter(g);scene.add(g);tiles.push(g);
+}
+
+/* ---------- obstacles & coins ---------- */
+const obs=[],coins=[],LANE=2.4;
+const coinG=new THREE.CylinderGeometry(.38,.38,.1,16);
+function addObs(type,l,z){
+  const x=type==='wall'||type==='pit'?(l-1)*LANE:0,g=new THREE.Group(),o={type,x,z,hw:1.1,hd:.6,y0:0,y1:2.4,m:g};
+  g.position.set(x,0,z);
+  if(type==='wall'){
+    bx(2.2,2.4,1.2,stoneD,0,1.2,0,g);
+    bx(.5,.25,.1,gold,-.5,1.6,.62,g);bx(.5,.25,.1,gold,.5,1.6,.62,g);
+    bx(1.6,.18,.1,M(0x3a362e),0,.9,.62,g);
+  }else if(type==='log'){
+    const m=new THREE.Mesh(new THREE.CylinderGeometry(.42,.42,7.6,10),logM);m.rotation.z=Math.PI/2;m.position.y=.42;m.castShadow=true;g.add(m);
+    Object.assign(o,{hw:4.2,hd:.45,y1:.85});
+  }else if(type==='beam'){
+    bx(.7,2.2,.7,stoneD,-3.9,1.1,0,g);bx(.7,2.2,.7,stoneD,3.9,1.1,0,g);bx(8.4,.6,.8,stoneD,0,1.6,0,g);
+    bx(8.0,.12,.1,gold,0,1.6,.45,g);
+    Object.assign(o,{hw:4.2,hd:.5,y0:1.3,y1:1.9});
+  }else{
+    const m=new THREE.Mesh(new THREE.PlaneGeometry(2.2,4),lava);m.rotation.x=-Math.PI/2;m.position.y=.03;g.add(m);
+    Object.assign(o,{hw:1.0,hd:2,y0:-5,y1:.12});
+  }
+  scene.add(g);obs.push(o);
+}
+function addCoins(l,z,y){for(let i=-2;i<=2;i++){const m=new THREE.Mesh(coinG,gold);m.rotation.x=Math.PI/2;m.position.set((l-1)*LANE,y,z+i*1.8);m.castShadow=true;scene.add(m);coins.push(m)}}
+function spawnRow(z){
+  const r=rnd(),free=rnd()*3|0;let cl=free,cy=1;
+  if(r<.3){for(let l=0;l<3;l++)if(l!==free)addObs('wall',l,z)}
+  else if(r<.5){addObs('log',1,z);cl=rnd()*3|0;cy=2.4}
+  else if(r<.68){addObs('beam',1,z);cl=rnd()*3|0;cy=.8}
+  else if(r<.88){for(let l=0;l<3;l++)if(l!==free)addObs('pit',l,z)}
+  else{addObs('wall',free,z);cl=(free+1+(rnd()*2|0))%3}
+  if(rnd()<.8)addCoins(cl,z,cy);
+}
+
+/* ---------- state ---------- */
+let state='menu',speed=14,dist=0,coinN=0,lane=1,vy=0,py=0,slideT=0,ph=1.9,tt=0,shake=0,nextZ=-45,flash=0;
+function reset(){
+  [...obs.map(o=>o.m),...coins].forEach(m=>scene.remove(m));obs.length=coins.length=0;
+  P.position.set(0,0,0);lane=1;vy=py=slideT=0;dist=coinN=0;speed=14;nextZ=-45;shake=0;P.rotation.set(0,0,0);body.rotation.x=0;
+  tiles.forEach((t,i)=>{t.position.z=TL/2-i*TL});
+}
+function start(){reset();state='play';$('ov').classList.add('hide');beep(520,.12,'triangle')}
+function die(){
+  state='dead';shake=.6;beep(110,.5,'sawtooth',.08);
+  if(dist>best){best=dist;try{localStorage.setItem('templeDash',Math.floor(best))}catch(e){}}
+  setTimeout(()=>{$('ti').textContent='You fell';
+    $('ms').textContent=`${Math.floor(dist)} metres, ${coinN} coins. Best: ${Math.floor(best)} metres.`;
+    $('go').textContent='Run again';$('ov').classList.remove('hide');$('go').focus()},700);
+}
+$('go').onclick=start;
+
+/* ---------- audio ---------- */
+let AC;function beep(f,d=.08,type='square',v=.04){try{AC=AC||new AudioContext();const o=AC.createOscillator(),g=AC.createGain();o.type=type;o.frequency.value=f;g.gain.value=v;o.connect(g);g.connect(AC.destination);o.start();g.gain.exponentialRampToValueAtTime(.001,AC.currentTime+d);o.stop(AC.currentTime+d)}catch(e){}}
+
+/* ---------- input ---------- */
+function act(a){
+  if(state!=='play')return;
+  if(a==='L'&&lane>0){lane--;beep(300,.05)}
+  if(a==='R'&&lane<2){lane++;beep(300,.05)}
+  if(a==='U'&&py===0){vy=15;slideT=0;beep(480,.1,'triangle')}
+  if(a==='D'){if(py>0)vy=-26;else{slideT=.7;beep(200,.1,'triangle')}}
+}
+addEventListener('keydown',e=>{
+  const k=e.code;
+  if(k==='ArrowLeft'||k==='KeyA')act('L');
+  else if(k==='ArrowRight'||k==='KeyD')act('R');
+  else if(k==='ArrowUp'||k==='KeyW'||k==='Space')act('U');
+  else if(k==='ArrowDown'||k==='KeyS')act('D');
+  if((k==='Space'||k==='Enter')&&state!=='play'&&!$('ov').classList.contains('hide'))start();
+  if(k.startsWith('Arrow')||k==='Space')e.preventDefault();
+});
+let tx=0,ty=0;
+addEventListener('touchstart',e=>{tx=e.touches[0].clientX;ty=e.touches[0].clientY},{passive:true});
+addEventListener('touchend',e=>{
+  const dx=e.changedTouches[0].clientX-tx,dy=e.changedTouches[0].clientY-ty;
+  if(Math.max(Math.abs(dx),Math.abs(dy))<24){act('U');return}
+  if(Math.abs(dx)>Math.abs(dy))act(dx<0?'L':'R');else act(dy<0?'U':'D');
+},{passive:true});
+
+/* ---------- loop ---------- */
+function collide(o){return Math.abs(o.x-P.position.x)<o.hw+.35&&Math.abs(o.z-P.position.z)<o.hd+.3&&py<o.y1&&py+ph>o.y0}
+let last=performance.now();
+function frame(now){
+  const dt=Math.min(.05,(now-last)/1000);last=now;
+  if(state==='play'){
+    speed=Math.min(34,speed+dt*.18);
+    P.position.z-=speed*dt;dist+=speed*dt;
+    if(py>0||vy>0){vy-=42*dt;py+=vy*dt;if(py<=0){py=0;vy=0}}
+    if(slideT>0)slideT-=dt;
+    ph=slideT>0?.8:1.9;
+    P.position.x+=((lane-1)*LANE-P.position.x)*Math.min(1,dt*14);
+    while(nextZ>P.position.z-120){spawnRow(nextZ);nextZ-=speed*.85+5}
+    for(const o of obs)if(collide(o)){die();break}
+    for(let i=coins.length-1;i>=0;i--){
+      const c=coins[i];c.rotation.z+=dt*5;
+      if(Math.abs(c.position.x-P.position.x)<.9&&Math.abs(c.position.z-P.position.z)<.9&&Math.abs(c.position.y-(py+.9))<1.2){
+        scene.remove(c);coins.splice(i,1);coinN++;beep(880+coinN%8*40,.07,'square',.03);
+      }else if(c.position.z>P.position.z+12){scene.remove(c);coins.splice(i,1)}
+    }
+    for(let i=obs.length-1;i>=0;i--)if(obs[i].z>P.position.z+12){scene.remove(obs[i].m);obs.splice(i,1)}
+    $('sc').textContent=Math.floor(dist);$('co').textContent=coinN+' coins';$('bs').textContent='best '+Math.floor(best);
+  }
+  if(state!=='dead')tt+=dt*(state==='play'?speed*.55:5);
+  // recycle tiles
+  tiles.forEach(t=>{if(t.position.z>P.position.z+18){t.position.z-=NT*TL;scatter(t)}});
+  // animate player
+  P.position.y=py;P.rotation.z=((P.position.x-(lane-1)*LANE))*.12;
+  const s=Math.sin(tt)*.9;
+  if(state==='dead'){body.rotation.x=Math.min(1.4,body.rotation.x+dt*5);P.position.y=0}
+  else if(py>0){legL.rotation.x=-.9;legR.rotation.x=.5;armL.rotation.x=-2.2;armR.rotation.x=-2.2;body.rotation.x=0;body.position.y=.85}
+  else if(slideT>0){body.rotation.x=1.15;body.position.y=.5;legL.rotation.x=legR.rotation.x=-.3;armL.rotation.x=armR.rotation.x=-1.4}
+  else{body.rotation.x=0;body.position.y=.85+Math.abs(Math.cos(tt))*.07;legL.rotation.x=s;legR.rotation.x=-s;armL.rotation.x=-s;armR.rotation.x=s}
+  // lights & camera
+  sun.position.set(P.position.x-8,16,P.position.z+6);sun.target.position.set(P.position.x,0,P.position.z-6);
+  shake=Math.max(0,shake-dt);
+  const sh=shake*.5;
+  cam.position.set(P.position.x*.6+(rnd()-.5)*sh,3.7+(rnd()-.5)*sh+py*.25,P.position.z+7.5);
+  cam.lookAt(P.position.x*.6,1.5,P.position.z-8);
+  cam.fov=62+(speed-14)*.35;cam.updateProjectionMatrix();
+  obs.forEach(o=>{if(o.type==='pit')o.m.children[0].material.emissiveIntensity=.7+Math.sin(now*.006+o.z)*.25});
+  renderer.render(scene,cam);
+  requestAnimationFrame(frame);
+}
+reset();requestAnimationFrame(frame);
+</script>
+</body>
+</html>
